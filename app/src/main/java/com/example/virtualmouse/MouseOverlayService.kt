@@ -1,236 +1,177 @@
 package com.example.virtualmouse
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.graphics.PixelFormat
+import android.net.Uri
 import android.os.Build
-import android.os.IBinder
-import android.util.DisplayMetrics
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.WindowManager
-import android.widget.FrameLayout
-import android.widget.ImageView
-import androidx.core.app.NotificationCompat
+import android.os.Bundle
+import android.provider.Settings
+import android.view.accessibility.AccessibilityManager
+import android.widget.ArrayAdapter
+import android.widget.SeekBar
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import com.example.virtualmouse.databinding.ActivityMainBinding
 
-/**
- * Sadece sanal mouse imleci gösterir ve sürükleyerek hareket ettirir.
- * Tıklama ve kenar geçişi YOKTUR.
- */
-class MouseOverlayService : Service() {
+class MainActivity : AppCompatActivity() {
 
-    companion object {
-        const val ACTION_START = "com.example.virtualmouse.START"
-        const val ACTION_STOP = "com.example.virtualmouse.STOP"
-        const val ACTION_UPDATE_SIZE = "com.example.virtualmouse.UPDATE_SIZE"
-        const val ACTION_UPDATE_SENSITIVITY = "com.example.virtualmouse.UPDATE_SENSITIVITY"
-        private const val CHANNEL_ID = "virtual_mouse_channel"
-        private const val NOTIFICATION_ID = 1001
-    }
-
-    private lateinit var windowManager: WindowManager
-    private var overlayView: FrameLayout? = null
-    private var cursorView: ImageView? = null
-
-    private var cursorX = 0f
-    private var cursorY = 0f
-    private var screenWidth = 0
-    private var screenHeight = 0
-    private var sensitivity = 1.0f
-    private var cursorSizeDp = 36
-
+    private lateinit var binding: ActivityMainBinding
     private val prefs by lazy { getSharedPreferences("vm_prefs", Context.MODE_PRIVATE) }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
 
-    override fun onCreate() {
-        super.onCreate()
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        createNotificationChannel()
-        loadSettings()
-        updateScreenMetrics()
-        cursorX = screenWidth / 2f
-        cursorY = screenHeight / 2f
+        setupSizeSpinner()
+        setupSensitivity()
+        setupButtons()
+        updatePermissionStatus()
+        updateSwitchState()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_START -> {
-                startForeground(NOTIFICATION_ID, buildNotification())
-                showOverlay()
+    override fun onResume() {
+        super.onResume()
+        updatePermissionStatus()
+        updateSwitchState()
+    }
+
+    private fun setupSizeSpinner() {
+        val sizes = arrayOf("Small", "Medium", "Large", "Custom")
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, sizes)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        binding.spinnerSize.adapter = adapter
+
+        val saved = prefs.getInt("mouse_size", 1)
+        binding.spinnerSize.setSelection(saved.coerceIn(0, 3))
+
+        binding.spinnerSize.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                prefs.edit().putInt("mouse_size", position).apply()
+                sendServiceCommand(MouseOverlayService.ACTION_UPDATE_SIZE)
             }
-            ACTION_STOP -> {
-                hideOverlay()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+    }
+
+    private fun setupSensitivity() {
+        val sens = prefs.getInt("sensitivity", 100)
+        binding.seekSensitivity.progress = sens
+        binding.tvSensitivityValue.text = "$sens%"
+
+        binding.seekSensitivity.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                binding.tvSensitivityValue.text = "$progress%"
+                if (fromUser) {
+                    prefs.edit().putInt("sensitivity", progress).apply()
+                    sendServiceCommand(MouseOverlayService.ACTION_UPDATE_SENSITIVITY)
+                }
             }
-            ACTION_UPDATE_SIZE, ACTION_UPDATE_SENSITIVITY -> {
-                loadSettings()
-                updateCursorSize()
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+    }
+
+    private fun setupButtons() {
+        binding.switchMouse.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) {
+                if (!hasOverlayPermission()) {
+                    binding.switchMouse.isChecked = false
+                    Toast.makeText(this, "Overlay izni gerekli", Toast.LENGTH_LONG).show()
+                    requestOverlayPermission()
+                    return@setOnCheckedChangeListener
+                }
+                startMouseService()
+            } else {
+                stopMouseService()
             }
+            updateSwitchLabel(isChecked)
         }
-        return START_STICKY
+
+        binding.btnOverlayPermission.setOnClickListener {
+            requestOverlayPermission()
+        }
+
+        binding.btnAccessibilityPermission.setOnClickListener {
+            openAccessibilitySettings()
+        }
     }
 
-    private fun loadSettings() {
-        val sizeIdx = prefs.getInt("mouse_size", 1)
-        cursorSizeDp = when (sizeIdx) {
-            0 -> 24
-            1 -> 36
-            2 -> 52
-            else -> 40
+    private fun startMouseService() {
+        val intent = Intent(this, MouseOverlayService::class.java).apply {
+            action = MouseOverlayService.ACTION_START
         }
-        sensitivity = prefs.getInt("sensitivity", 100) / 100f
+        ContextCompat.startForegroundService(this, intent)
+        binding.tvStatus.text = "Service running"
+        prefs.edit().putBoolean("mouse_enabled", true).apply()
     }
 
-    private fun updateScreenMetrics() {
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        windowManager.defaultDisplay.getRealMetrics(metrics)
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
+    private fun stopMouseService() {
+        val intent = Intent(this, MouseOverlayService::class.java).apply {
+            action = MouseOverlayService.ACTION_STOP
+        }
+        startService(intent)
+        binding.tvStatus.text = "Service stopped"
+        prefs.edit().putBoolean("mouse_enabled", false).apply()
     }
 
-    private fun showOverlay() {
-        if (overlayView != null) return
-
-        overlayView = FrameLayout(this).apply {
-            setBackgroundColor(0x00000000)
-            isClickable = true
-            isFocusable = true
+    private fun sendServiceCommand(action: String) {
+        if (prefs.getBoolean("mouse_enabled", false)) {
+            val intent = Intent(this, MouseOverlayService::class.java).apply {
+                this.action = action
+            }
+            startService(intent)
         }
+    }
 
-        cursorView = ImageView(this).apply {
-            setImageResource(R.drawable.cursor_arrow)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-        }
+    private fun updateSwitchState() {
+        val enabled = prefs.getBoolean("mouse_enabled", false)
+        binding.switchMouse.isChecked = enabled
+        updateSwitchLabel(enabled)
+        binding.tvStatus.text = if (enabled) "Service running" else "Service stopped"
+    }
 
-        val density = resources.displayMetrics.density
-        val sizePx = (cursorSizeDp * density).toInt()
-        val cursorLp = FrameLayout.LayoutParams(sizePx, sizePx)
-        overlayView!!.addView(cursorView, cursorLp)
+    private fun updateSwitchLabel(enabled: Boolean) {
+        binding.switchMouse.text = if (enabled) "Mouse Enabled" else "Mouse Disabled"
+    }
 
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+    private fun updatePermissionStatus() {
+        if (hasOverlayPermission()) {
+            binding.tvOverlayStatus.text = "Overlay: Granted"
+            binding.tvOverlayStatus.setTextColor(ContextCompat.getColor(this, R.color.success))
+            binding.btnOverlayPermission.isEnabled = false
         } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
+            binding.tvOverlayStatus.text = "Overlay: Not granted"
+            binding.tvOverlayStatus.setTextColor(ContextCompat.getColor(this, R.color.error))
+            binding.btnOverlayPermission.isEnabled = true
         }
 
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-        }
-
-        overlayView!!.setOnTouchListener { _, event ->
-            handleTouch(event)
-            true
-        }
-
-        try {
-            windowManager.addView(overlayView, params)
-            positionCursor()
-        } catch (e: Exception) {
-            e.printStackTrace()
-            stopSelf()
-        }
+        // Accessibility artık zorunlu değil (sadece hareket için)
+        binding.tvAccessibilityStatus.text = "Accessibility: Optional (not needed for move only)"
+        binding.tvAccessibilityStatus.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
+        binding.btnAccessibilityPermission.isEnabled = true
     }
 
-    private fun hideOverlay() {
-        overlayView?.let {
-            try { windowManager.removeView(it) } catch (_: Exception) {}
-        }
-        overlayView = null
-        cursorView = null
+    private fun hasOverlayPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(this)
+        } else true
     }
 
-    private fun updateCursorSize() {
-        cursorView?.let { cv ->
-            val density = resources.displayMetrics.density
-            val sizePx = (cursorSizeDp * density).toInt()
-            val lp = cv.layoutParams as FrameLayout.LayoutParams
-            lp.width = sizePx
-            lp.height = sizePx
-            cv.layoutParams = lp
-            positionCursor()
-        }
-    }
-
-    private fun positionCursor() {
-        cursorView?.let { cv ->
-            val density = resources.displayMetrics.density
-            val half = (cursorSizeDp * density) / 2f
-            cv.x = cursorX - half
-            cv.y = cursorY - half
-        }
-    }
-
-    private var lastTouchX = 0f
-    private var lastTouchY = 0f
-
-    private fun handleTouch(event: MotionEvent): Boolean {
-        when (event.action) {
-            MotionEvent.ACTION_DOWN -> {
-                lastTouchX = event.rawX
-                lastTouchY = event.rawY
-            }
-            MotionEvent.ACTION_MOVE -> {
-                val dx = (event.rawX - lastTouchX) * sensitivity
-                val dy = (event.rawY - lastTouchY) * sensitivity
-
-                cursorX = (cursorX + dx).coerceIn(0f, screenWidth.toFloat())
-                cursorY = (cursorY + dy).coerceIn(0f, screenHeight.toFloat())
-
-                lastTouchX = event.rawX
-                lastTouchY = event.rawY
-                positionCursor()
-            }
-            // ACTION_UP → hiçbir şey yapma (tıklama yok)
-        }
-        return true
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Virtual Mouse",
-                NotificationManager.IMPORTANCE_LOW
+    private fun requestOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
             )
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            startActivity(intent)
         }
     }
 
-    private fun buildNotification(): Notification {
-        val openIntent = Intent(this, MainActivity::class.java)
-        val pi = PendingIntent.getActivity(
-            this, 0, openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Virtual Mouse Active")
-            .setContentText("Cursor is active – only movement")
-            .setSmallIcon(R.drawable.cursor_arrow)
-            .setContentIntent(pi)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
-    }
-
-    override fun onDestroy() {
-        hideOverlay()
-        super.onDestroy()
+    private fun openAccessibilitySettings() {
+        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 }

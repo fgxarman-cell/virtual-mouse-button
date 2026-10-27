@@ -97,8 +97,6 @@ class MouseOverlayService : Service() {
 
         overlayView = FrameLayout(this).apply {
             setBackgroundColor(0x00000000)
-            isClickable = true
-            isFocusable = true
         }
 
         cursorView = ImageView(this).apply {
@@ -117,19 +115,22 @@ class MouseOverlayService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
+        // ÖNEMLİ: FLAG_NOT_TOUCH_MODAL → imleç dışındaki dokunuşlar uygulamalara gider
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
         }
 
-        overlayView!!.setOnTouchListener { _, event ->
+        // Sadece imlecin kendisine dokunuş dinleyicisi koyuyoruz
+        cursorView!!.setOnTouchListener { _, event ->
             handleTouch(event)
             true
         }
@@ -184,8 +185,10 @@ class MouseOverlayService : Service() {
             MotionEvent.ACTION_MOVE -> {
                 val dx = (event.rawX - lastTouchX) * sensitivity
                 val dy = (event.rawY - lastTouchY) * sensitivity
+
                 cursorX = (cursorX + dx).coerceIn(0f, screenWidth.toFloat())
                 cursorY = (cursorY + dy).coerceIn(0f, screenHeight.toFloat())
+
                 lastTouchX = event.rawX
                 lastTouchY = event.rawY
                 positionCursor()
@@ -196,19 +199,24 @@ class MouseOverlayService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "Virtual Mouse", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Virtual Mouse",
+                NotificationManager.IMPORTANCE_LOW
+            )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
     private fun buildNotification(): Notification {
         val pi = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
+            this, 0,
+            Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Virtual Mouse Active")
-            .setContentText("Only movement")
+            .setContentText("İmleci tutup sürükleyerek hareket ettir")
             .setSmallIcon(R.drawable.cursor_arrow)
             .setContentIntent(pi)
             .setOngoing(true)
